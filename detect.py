@@ -2,7 +2,11 @@ import argparse
 import os
 import platform
 import sys
+import time
 from pathlib import Path
+
+import keyboard
+import utils.armcomm
 
 import torch
 
@@ -19,6 +23,8 @@ from utils.general import (LOGGER, Profile, check_file, check_img_size, check_im
 from utils.plots import Annotator, colors, save_one_box
 from utils.torch_utils import select_device, smart_inference_mode
 
+#ARM_ENABLED = True
+
 
 @smart_inference_mode()
 def run(
@@ -29,12 +35,12 @@ def run(
         conf_thres=0.25,  # confidence threshold
         iou_thres=0.45,  # NMS IOU threshold
         max_det=1000,  # maximum detections per image
-        device='',  # cuda device, i.e. 0 or 0,1,2,3 or cpu
+        device='0',  # cuda device, i.e. 0 or 0,1,2,3 or cpu
         view_img=False,  # show results
         save_txt=False,  # save results to *.txt
         save_conf=False,  # save confidences in --save-txt labels
         save_crop=False,  # save cropped prediction boxes
-        nosave=False,  # do not save images/videos
+        nosave=True,  # do not save images/videos
         classes=None,  # filter by class: --class 0, or --class 0 2 3
         agnostic_nms=False,  # class-agnostic NMS
         augment=False,  # augmented inference
@@ -49,7 +55,13 @@ def run(
         half=False,  # use FP16 half-precision inference
         dnn=False,  # use OpenCV DNN for ONNX inference
         vid_stride=1,  # video frame-rate stride
+        verbose=False,
+        noarm=False
 ):
+    #instantiating for arm comm
+    last_update_time = 0
+    #current_angle_code = utils.armcomm.make_angle_code_from_angle_list(utils.armcomm.rest_angle_list)
+
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
     is_file = Path(source).suffix[1:] in (IMG_FORMATS + VID_FORMATS)
@@ -140,8 +152,29 @@ def run(
 
                     if save_img or save_crop or view_img:  # Add bbox to image
                         c = int(cls)  # integer class
-                        label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
+                        xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
+
+                        if not noarm:
+                            update_threshold = 1
+                            if time.time() - last_update_time > update_threshold:
+                                last_update_time, current_angle_code = utils.armcomm.update_angle_code(xywh)
+                                utils.armcomm.update_state(current_angle_code)
+
+                        # if not noarm and ARM_ENABLED:
+                        #     update_threshold = 1
+                        #     if time.time() - last_update_time > update_threshold:
+                        #         last_update_time, current_angle_code = utils.armcomm.update_angle_code(xywh)
+                        #         utils.armcomm.update_state(current_angle_code)
+                        # else:
+                        #     utils.armcomm.update_state('END')
+
+                        label_str = (f'x={xywh[0]:.2f} y={xywh[1]:.2f}')
+                        label = None if hide_labels else (names[c] if hide_conf else label_str)
+
+                        #label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f} ')
                         annotator.box_label(xyxy, label, color=colors(c, True))
+
+
                     if save_crop:
                         save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
 
@@ -175,7 +208,8 @@ def run(
                     vid_writer[i].write(im0)
 
         # Print time (inference-only)
-        LOGGER.info(f"{s}{'' if len(det) else '(no detections), '}{dt[1].dt * 1E3:.1f}ms")
+        if verbose==True:
+            LOGGER.info(f"{s}{'' if len(det) else '(no detections), '}{dt[1].dt * 1E3:.1f}ms")
 
     # Print results
     t = tuple(x.t / seen * 1E3 for x in dt)  # speeds per image
@@ -185,7 +219,7 @@ def run(
         LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}{s}")
     if update:
         strip_optimizer(weights[0])  # update model (to fix SourceChangeWarning)
-
+    
 
 def parse_opt():
     parser = argparse.ArgumentParser()
@@ -216,17 +250,30 @@ def parse_opt():
     parser.add_argument('--half', action='store_true', help='use FP16 half-precision inference')
     parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
     parser.add_argument('--vid-stride', type=int, default=1, help='video frame-rate stride')
+    parser.add_argument('--verbose', type=bool, default=False, help='device info, num of objects, classes and time')
+    parser.add_argument('--noarm', type=bool, default=False, help='enable or disable arm')
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
     print_args(vars(opt))
     return opt
 
 
+def exit_on_key(keyname):
+    def callback(event):
+        if event.name == keyname:
+            #ARM_ENABLED=False
+            os._exit(1)
+    return callback
+
+
 def main(opt):
     check_requirements(exclude=('tensorboard', 'thop'))
+    print('here is main')
     run(**vars(opt))
 
 
 if __name__ == "__main__":
+    utils.armcomm.update_state('90-90-0-45-60')
+    keyboard.hook(exit_on_key('esc'))
     opt = parse_opt()
     main(opt)
